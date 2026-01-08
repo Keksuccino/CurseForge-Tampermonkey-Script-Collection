@@ -12,7 +12,7 @@ The `curseforge-transactions-export-csv.user.js` script adds a button to the Tra
 
 ## 10K Transaction Rows Per Page
 
-The `curseforge-transactions-10k.user.js` script adds a new **10000** option to the **Rows per Page** dropdown of the Transactions page, to make it, well, load 10k entries as once.<br>
+The `curseforge-transactions-10k.user.js` script adds a new **10000** option to the **Rows per Page** dropdown of the Transactions page, to make it load 10k entries at once.<br>
 Use with caution. Creates some lag.
 
 <img width="537" alt="Screenshot_2" src="https://github.com/user-attachments/assets/b970e0e6-33ce-4467-9564-11044e6aae56" />
