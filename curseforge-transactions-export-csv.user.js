@@ -16,6 +16,12 @@
   const MAX_PAGES = 500;
   const LIST_KEYS = ['data', 'results', 'items', 'transactions', 'list', 'rows'];
   const TOTAL_KEYS = ['total', 'totalCount', 'count', 'recordsTotal', 'totalResults'];
+  const ORDER_HINTS = ['order', 'payout', 'payment', 'withdraw', 'paid'];
+  const ORDER_META_KEYS = ['item', 'quantity', 'order', 'orderid', 'payout', 'payment', 'vendor', 'gift', 'reward'];
+  const MONEY_KEY_HINTS = ['value', 'amount', 'total', 'net', 'gross', 'payout', 'payment'];
+  const MONEY_SKIP_HINTS = ['point', 'points', 'count', 'index', 'qty', 'quantity', 'id'];
+  const POINT_KEYS = ['point', 'points'];
+  const DEFAULT_POINTS_RATE = 20;
 
   let lastRequest = null;
   let lastPayload = null;
@@ -347,6 +353,205 @@
     return text;
   }
 
+  function isOrderLike(item) {
+    if (!item || typeof item !== 'object') return false;
+    const fields = [
+      item.Type,
+      item.type,
+      item.TransactionType,
+      item.transactionType,
+      item.Kind,
+      item.kind,
+      item.Category,
+      item.category,
+      item.Name,
+      item.name,
+    ];
+    return fields.some((value) => typeof value === 'string' && ORDER_HINTS.some((hint) => value.toLowerCase().includes(hint)));
+  }
+
+  function parsePossibleJson(value) {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (!(trimmed.startsWith('{') || trimmed.startsWith('['))) return null;
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return null;
+    }
+  }
+
+  function hasOrderMeta(item, depth) {
+    if (!item || typeof item !== 'object' || depth > 4) return false;
+    if (isOrderMetaObject(item)) return true;
+    const keys = Object.keys(item);
+    const keyHits = keys.filter((key) => ORDER_META_KEYS.some((hint) => key.toLowerCase().includes(hint)));
+    if (keyHits.length >= 2) return true;
+
+    for (const [key, value] of Object.entries(item)) {
+      const keyLower = key.toLowerCase();
+      if (ORDER_META_KEYS.some((hint) => keyLower.includes(hint)) && value != null) return true;
+      if (typeof value === 'string') {
+        const parsed = parsePossibleJson(value);
+        if (parsed && hasOrderMeta(parsed, depth + 1)) return true;
+      } else if (value && typeof value === 'object') {
+        if (hasOrderMeta(value, depth + 1)) return true;
+      }
+    }
+
+    return false;
+  }
+
+  function isOrderMetaObject(obj) {
+    if (!obj || typeof obj !== 'object') return false;
+    const keys = Object.keys(obj).map((key) => key.toLowerCase());
+    const hasItem = keys.some((key) => key.includes('item'));
+    const hasQuantity = keys.some((key) => key.includes('quantity') || key.includes('qty'));
+    const hasId = keys.some((key) => key === 'id' || key.endsWith('id'));
+    return (hasItem && hasQuantity) || (hasItem && hasId);
+  }
+
+  function formatMoneyValue(value) {
+    if (value == null) return null;
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    if (typeof value === 'string') return value;
+    if (typeof value === 'object') {
+      const amount = value.amount ?? value.Amount ?? value.value ?? value.Value;
+      const currency = value.currency ?? value.Currency ?? value.currencyCode ?? value.CurrencyCode ?? value.symbol ?? value.Symbol;
+      if (amount == null) return null;
+      if (currency == null) return String(amount);
+      const currencyText = String(currency).trim();
+      if (!currencyText) return String(amount);
+      if (/^[^A-Za-z0-9]/.test(currencyText)) return `${currencyText}${amount}`;
+      return `${amount} ${currencyText}`;
+    }
+    return null;
+  }
+
+  function findCurrencyHint(item, depth) {
+    if (!item || typeof item !== 'object' || depth > 4) return null;
+    for (const [key, value] of Object.entries(item)) {
+      const keyLower = key.toLowerCase();
+      if (keyLower.includes('currency') || keyLower.includes('symbol')) {
+        if (typeof value === 'string' && value.trim()) return value.trim();
+        if (typeof value === 'object' && value) {
+          const nested = findCurrencyHint(value, depth + 1);
+          if (nested) return nested;
+        }
+      }
+      if (typeof value === 'string') {
+        const parsed = parsePossibleJson(value);
+        if (parsed) {
+          const nested = findCurrencyHint(parsed, depth + 1);
+          if (nested) return nested;
+        }
+      } else if (value && typeof value === 'object') {
+        const nested = findCurrencyHint(value, depth + 1);
+        if (nested) return nested;
+      }
+    }
+    return null;
+  }
+
+  function findMoneyCandidate(item, depth) {
+    if (!item || typeof item !== 'object' || depth > 4) return null;
+    for (const [key, value] of Object.entries(item)) {
+      const keyLower = key.toLowerCase();
+      if (MONEY_SKIP_HINTS.some((hint) => keyLower.includes(hint))) continue;
+
+      if (MONEY_KEY_HINTS.some((hint) => keyLower.includes(hint))) {
+        const formatted = formatMoneyValue(value);
+        if (formatted != null) return formatted;
+      }
+
+      if (value && typeof value === 'object') {
+        const formatted = formatMoneyValue(value);
+        if (formatted != null && MONEY_KEY_HINTS.some((hint) => keyLower.includes(hint))) return formatted;
+        const nested = findMoneyCandidate(value, depth + 1);
+        if (nested != null) return nested;
+      } else if (typeof value === 'string') {
+        const parsed = parsePossibleJson(value);
+        if (parsed) {
+          const nested = findMoneyCandidate(parsed, depth + 1);
+          if (nested != null) return nested;
+        }
+      }
+    }
+    return null;
+  }
+
+  function findPointsValue(item, depth) {
+    if (!item || typeof item !== 'object' || depth > 4) return null;
+    for (const [key, value] of Object.entries(item)) {
+      const keyLower = key.toLowerCase();
+      if (POINT_KEYS.some((hint) => keyLower.includes(hint))) {
+        const num = Number(value);
+        if (Number.isFinite(num)) return num;
+      }
+      if (typeof value === 'string') {
+        const parsed = parsePossibleJson(value);
+        if (parsed) {
+          const nested = findPointsValue(parsed, depth + 1);
+          if (nested != null) return nested;
+        }
+      } else if (value && typeof value === 'object') {
+        const nested = findPointsValue(value, depth + 1);
+        if (nested != null) return nested;
+      }
+    }
+    return null;
+  }
+
+  function computeValueFromPoints(points, currencyHint) {
+    if (!Number.isFinite(points)) return null;
+    const amount = Math.round((Math.abs(points) / DEFAULT_POINTS_RATE) * 100) / 100;
+    if (currencyHint) {
+      return formatMoneyValue({ amount, currency: currencyHint });
+    }
+    return amount.toFixed(2);
+  }
+
+  function getExportValue(item) {
+    if (!item || typeof item !== 'object') return '';
+    const direct = formatMoneyValue(item.Value ?? item.value);
+    if (direct != null) return direct;
+    const orderLike = isOrderLike(item) || hasOrderMeta(item, 0) || Boolean(findOrderMeta(item, 0));
+    if (!orderLike) return '';
+    const derived = findMoneyCandidate(item, 0);
+    if (derived != null) return derived;
+
+    const points = findPointsValue(item, 0);
+    if (points == null) return '';
+    const currencyHint = findCurrencyHint(item, 0);
+    const computed = computeValueFromPoints(points, currencyHint);
+    return computed != null ? computed : '';
+  }
+
+  function findOrderMeta(item, depth) {
+    if (!item || typeof item !== 'object' || depth > 4) return null;
+
+    for (const [key, value] of Object.entries(item)) {
+      const keyLower = key.toLowerCase();
+      if (keyLower.includes('order') && value != null && value !== '') return value;
+
+      if (typeof value === 'string') {
+        const parsed = parsePossibleJson(value);
+        if (parsed && isOrderMetaObject(parsed)) return parsed;
+        if (parsed) {
+          const nested = findOrderMeta(parsed, depth + 1);
+          if (nested) return nested;
+        }
+      } else if (value && typeof value === 'object') {
+        if (isOrderMetaObject(value)) return value;
+        const nested = findOrderMeta(value, depth + 1);
+        if (nested) return nested;
+      }
+    }
+
+    return null;
+  }
+
   function buildCsv(items) {
     if (!items || !items.length) return '';
 
@@ -362,11 +567,19 @@
       }
     }
 
+    if (!seen.has('Value')) {
+      columns.push('Value');
+      seen.add('Value');
+    }
+
     const lines = [];
     lines.push(columns.map(csvEscape).join(','));
 
     for (const item of items) {
-      const row = columns.map((key) => csvEscape(item ? item[key] : ''));
+      const row = columns.map((key) => {
+        if (key === 'Value') return csvEscape(getExportValue(item));
+        return csvEscape(item ? item[key] : '');
+      });
       lines.push(row.join(','));
     }
 
